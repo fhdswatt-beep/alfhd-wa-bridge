@@ -25,23 +25,46 @@ const fs = require('fs');
 const SUPABASE_URL = process.env.SUPABASE_URL || 'https://wqfuovvebgipiowaarbo.supabase.co';
 const SUPABASE_KEY = process.env.SUPABASE_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndxZnVvdnZlYmdpcGlvd2FhcmJvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODE5MTM2ODEsImV4cCI6MjA5NzQ4OTY4MX0.xeQ80kco6TOpbyMnYonzSCBDI3Hn_EKiavKKfC7kLl8';
 const PORT = process.env.PORT || 3001;
+const AUTH_DIR = path.join(__dirname, 'auth_info');
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
-// ── Express server (health check + status) ──
+// ── Express server ──
 const app = express();
 app.use(express.json());
 
+// Health check
 app.get('/', (req, res) => {
   res.json({ status: 'running', connected: global.waConnected || false });
 });
 
+// Status
 app.get('/status', (req, res) => {
   res.json({
     connected: global.waConnected || false,
     phone: global.waPhone || null,
     uptime: process.uptime(),
   });
+});
+
+// ✅ مسح الـ Session وإعادة التشغيل
+app.post('/reset-session', (req, res) => {
+  try {
+    if (fs.existsSync(AUTH_DIR)) {
+      fs.rmSync(AUTH_DIR, { recursive: true, force: true });
+      console.log('🗑️ تم مسح ملفات الـ Session');
+    }
+    global.pairingRequested = false;
+    global.waConnected = false;
+    global.waPhone = null;
+
+    res.json({ success: true, message: 'تم مسح الـ Session. سيتم إعادة التشغيل خلال ثانية...' });
+
+    // Railway سيعيد التشغيل تلقائياً بعد الخروج
+    setTimeout(() => process.exit(0), 1000);
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
 });
 
 app.listen(PORT, () => {
@@ -63,13 +86,12 @@ async function saveMessage(msg, direction) {
   try {
     const jid = msg.key.remoteJid;
     if (!jid || jid === 'status@broadcast') return;
-    if (isGroup(jid)) return; // تجاهل المجموعات
+    if (isGroup(jid)) return;
 
     const phone = normalizePhone(jid);
     const msgId = msg.key.id;
     const timestamp = new Date((msg.messageTimestamp || Date.now() / 1000) * 1000).toISOString();
 
-    // استخراج النص
     let content = '';
     let msgType = 'text';
 
@@ -97,15 +119,12 @@ async function saveMessage(msg, direction) {
       content = '🎭 ملصق';
       msgType = 'sticker';
     } else {
-      return; // رسالة غير معروفة
+      return;
     }
 
-    // اسم المرسل
     const pushName = msg.pushName || phone;
-
-    // ابحث عن محادثة موجودة أو أنشئ واحدة
     const convKey = `wa_${phone}`;
-    
+
     const { data: existing } = await supabase
       .from('alfhd_conversations')
       .select('id, unread_count')
@@ -117,7 +136,6 @@ async function saveMessage(msg, direction) {
 
     if (existing) {
       convId = existing.id;
-      // تحديث آخر رسالة
       await supabase.from('alfhd_conversations').update({
         last_message: content.slice(0, 200),
         last_message_time: timestamp,
@@ -125,7 +143,6 @@ async function saveMessage(msg, direction) {
         customer_name: direction === 'incoming' ? pushName : existing.customer_name,
       }).eq('id', convId);
     } else {
-      // محادثة جديدة
       const { data: newConv } = await supabase
         .from('alfhd_conversations')
         .insert({
@@ -146,7 +163,6 @@ async function saveMessage(msg, direction) {
 
     if (!convId) return;
 
-    // حفظ الرسالة
     const { error } = await supabase.from('alfhd_messages').insert({
       conversation_id: convId,
       direction,
@@ -157,7 +173,7 @@ async function saveMessage(msg, direction) {
       source: 'whatsapp',
     });
 
-    if (error && error.code !== '23505') { // تجاهل duplicate
+    if (error && error.code !== '23505') {
       console.error('DB error:', error.message);
     } else {
       console.log(`✅ ${direction === 'incoming' ? '📨' : '📤'} WA: ${pushName} → ${content.slice(0, 50)}`);
@@ -168,14 +184,11 @@ async function saveMessage(msg, direction) {
   }
 }
 
-const readline = require('readline');
-
 // ── WhatsApp Connection ──
 async function connectToWhatsApp() {
-  const authDir = path.join(__dirname, 'auth_info');
-  if (!fs.existsSync(authDir)) fs.mkdirSync(authDir, { recursive: true });
+  if (!fs.existsSync(AUTH_DIR)) fs.mkdirSync(AUTH_DIR, { recursive: true });
 
-  const { state, saveCreds } = await useMultiFileAuthState(authDir);
+  const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
   const { version } = await fetchLatestBaileysVersion();
 
   console.log(`📱 Baileys version: ${version.join('.')}`);
@@ -190,11 +203,9 @@ async function connectToWhatsApp() {
     markOnlineOnConnect: false,
   });
 
-  // ── ربط برقم الهاتف ──
   sock.ev.on('connection.update', async (update) => {
     const { connection, lastDisconnect, qr } = update;
 
-    // لو لم يتم التسجيل بعد — استخدم pairing code
     if (!sock.authState.creds.registered) {
       const phoneNumber = process.env.WA_PHONE_NUMBER;
       if (phoneNumber && !global.pairingRequested) {
@@ -211,8 +222,14 @@ async function connectToWhatsApp() {
         } catch (e) {
           global.pairingRequested = false;
           console.error('خطأ في طلب كود الربط:', e.message);
+          // ✅ إذا فشل طلب الكود — امسح الـ session وأعد التشغيل
+          console.log('🔄 مسح الـ Session تلقائياً بسبب فشل الربط...');
+          if (fs.existsSync(AUTH_DIR)) {
+            fs.rmSync(AUTH_DIR, { recursive: true, force: true });
+          }
+          setTimeout(() => process.exit(0), 2000);
         }
-      } else {
+      } else if (!phoneNumber) {
         // fallback للـ QR
         if (qr) {
           console.log('\n═══════════════════════════════════');
@@ -225,10 +242,27 @@ async function connectToWhatsApp() {
 
     if (connection === 'close') {
       global.waConnected = false;
-      const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
+      const statusCode = lastDisconnect?.error?.output?.statusCode;
+      const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
       console.log('❌ انقطع الاتصال. إعادة محاولة:', shouldReconnect);
+
       if (shouldReconnect) {
-        setTimeout(connectToWhatsApp, 3000);
+        // ✅ إذا كانت المشكلة Connection Closed — امسح الـ session وأعد
+        if (statusCode === DisconnectReason.connectionClosed ||
+            statusCode === DisconnectReason.connectionLost ||
+            statusCode === DisconnectReason.timedOut) {
+          console.log('🔄 إعادة الاتصال...');
+          setTimeout(connectToWhatsApp, 5000);
+        } else {
+          setTimeout(connectToWhatsApp, 3000);
+        }
+      } else {
+        // تم تسجيل الخروج — امسح الـ session
+        console.log('🗑️ تم تسجيل الخروج. مسح الـ Session...');
+        if (fs.existsSync(AUTH_DIR)) {
+          fs.rmSync(AUTH_DIR, { recursive: true, force: true });
+        }
+        setTimeout(connectToWhatsApp, 5000);
       }
     }
 
@@ -239,13 +273,10 @@ async function connectToWhatsApp() {
     }
   });
 
-  // ── حفظ الـ credentials ──
   sock.ev.on('creds.update', saveCreds);
 
-  // ── استقبال الرسائل ──
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
     if (type !== 'notify') return;
-
     for (const msg of messages) {
       if (!msg.message) continue;
       const direction = msg.key.fromMe ? 'outgoing' : 'incoming';
