@@ -25,7 +25,7 @@ const fs = require('fs');
 const SUPABASE_URL = process.env.SUPABASE_URL || 'https://wqfuovvebgipiowaarbo.supabase.co';
 const SUPABASE_KEY = process.env.SUPABASE_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndxZnVvdnZlYmdpcGlvd2FhcmJvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODE5MTM2ODEsImV4cCI6MjA5NzQ4OTY4MX0.xeQ80kco6TOpbyMnYonzSCBDI3Hn_EKiavKKfC7kLl8';
 const PORT = process.env.PORT || 3001;
-const AUTH_DIR = path.join(__dirname, 'auth_info');
+const AUTH_DIR = path.join(__dirname, 'auth_info_business');
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
@@ -33,12 +33,10 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 const app = express();
 app.use(express.json());
 
-// Health check
 app.get('/', (req, res) => {
   res.json({ status: 'running', connected: global.waConnected || false });
 });
 
-// Status
 app.get('/status', (req, res) => {
   res.json({
     connected: global.waConnected || false,
@@ -47,7 +45,7 @@ app.get('/status', (req, res) => {
   });
 });
 
-// ✅ مسح الـ Session وإعادة التشغيل
+// مسح الـ Session وإعادة التشغيل
 app.post('/reset-session', (req, res) => {
   try {
     if (fs.existsSync(AUTH_DIR)) {
@@ -59,8 +57,6 @@ app.post('/reset-session', (req, res) => {
     global.waPhone = null;
 
     res.json({ success: true, message: 'تم مسح الـ Session. سيتم إعادة التشغيل خلال ثانية...' });
-
-    // Railway سيعيد التشغيل تلقائياً بعد الخروج
     setTimeout(() => process.exit(0), 1000);
   } catch (e) {
     res.status(500).json({ success: false, error: e.message });
@@ -198,7 +194,8 @@ async function connectToWhatsApp() {
     auth: state,
     printQRInTerminal: false,
     logger: pino({ level: 'silent' }),
-    browser: ['AlFhd', 'Chrome', '1.0.0'],
+    // ✅ إعدادات واتساب Business
+    browser: ['Ubuntu', 'Chrome', '22.0.0'],
     syncFullHistory: false,
     markOnlineOnConnect: false,
   });
@@ -215,14 +212,13 @@ async function connectToWhatsApp() {
           const code = await sock.requestPairingCode(phoneNumber);
           console.log('\n═══════════════════════════════════');
           console.log(`📱 كود الربط: ${code}`);
-          console.log('افتح واتساب ← الأجهزة المرتبطة ← ربط جهاز ← ربط برقم الهاتف');
+          console.log('افتح واتساب Business ← الأجهزة المرتبطة ← ربط جهاز ← ربط برقم الهاتف');
           console.log(`أدخل الكود: ${code}`);
           console.log('الكود صالح لمدة 160 ثانية');
           console.log('═══════════════════════════════════\n');
         } catch (e) {
           global.pairingRequested = false;
           console.error('خطأ في طلب كود الربط:', e.message);
-          // ✅ إذا فشل طلب الكود — امسح الـ session وأعد التشغيل
           console.log('🔄 مسح الـ Session تلقائياً بسبب فشل الربط...');
           if (fs.existsSync(AUTH_DIR)) {
             fs.rmSync(AUTH_DIR, { recursive: true, force: true });
@@ -230,7 +226,6 @@ async function connectToWhatsApp() {
           setTimeout(() => process.exit(0), 2000);
         }
       } else if (!phoneNumber) {
-        // fallback للـ QR
         if (qr) {
           console.log('\n═══════════════════════════════════');
           console.log('امسح هذا الكود بواتساب:');
@@ -247,7 +242,6 @@ async function connectToWhatsApp() {
       console.log('❌ انقطع الاتصال. إعادة محاولة:', shouldReconnect);
 
       if (shouldReconnect) {
-        // ✅ إذا كانت المشكلة Connection Closed — امسح الـ session وأعد
         if (statusCode === DisconnectReason.connectionClosed ||
             statusCode === DisconnectReason.connectionLost ||
             statusCode === DisconnectReason.timedOut) {
@@ -257,7 +251,6 @@ async function connectToWhatsApp() {
           setTimeout(connectToWhatsApp, 3000);
         }
       } else {
-        // تم تسجيل الخروج — امسح الـ session
         console.log('🗑️ تم تسجيل الخروج. مسح الـ Session...');
         if (fs.existsSync(AUTH_DIR)) {
           fs.rmSync(AUTH_DIR, { recursive: true, force: true });
@@ -269,7 +262,7 @@ async function connectToWhatsApp() {
     if (connection === 'open') {
       global.waConnected = true;
       global.waPhone = sock.user?.id?.split(':')[0];
-      console.log(`\n✅ واتساب متصل! الرقم: ${global.waPhone}`);
+      console.log(`\n✅ واتساب Business متصل! الرقم: ${global.waPhone}`);
     }
   });
 
