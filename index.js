@@ -20,6 +20,9 @@ const SUPABASE_KEY = process.env.SUPABASE_KEY;
 const PORT = process.env.PORT || 3001;
 const WA_PHONE = process.env.WA_PHONE_NUMBER || '';
 
+// ✅ مجلد جديد دائماً عشان نتجنب الـ session القديمة
+const AUTH_DIR = path.join(__dirname, 'auth_info_business');
+
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
 // ── Express ──
@@ -29,7 +32,7 @@ app.use(express.json());
 app.get('/', (req, res) => res.json({ status: 'running', connected: global.waConnected || false }));
 app.get('/status', (req, res) => res.json({ connected: global.waConnected || false, phone: global.waPhone || null }));
 
-// ── إرسال رسالة (للرد من الموقع) ──
+// إرسال رسالة (للرد من الموقع)
 app.post('/send', async (req, res) => {
   const { phone, message } = req.body;
   if (!phone || !message) return res.status(400).json({ error: 'phone and message required' });
@@ -40,6 +43,23 @@ app.post('/send', async (req, res) => {
     res.json({ success: true });
   } catch (e) {
     res.status(500).json({ error: e.message });
+  }
+});
+
+// مسح الـ Session وإعادة التشغيل
+app.post('/reset-session', (req, res) => {
+  try {
+    if (fs.existsSync(AUTH_DIR)) {
+      fs.rmSync(AUTH_DIR, { recursive: true, force: true });
+      console.log('🗑️ تم مسح ملفات الـ Session');
+    }
+    global.pairingDone = false;
+    global.waConnected = false;
+    global.waPhone = null;
+    res.json({ success: true, message: 'تم مسح الـ Session. سيتم إعادة التشغيل...' });
+    setTimeout(() => process.exit(0), 1000);
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
   }
 });
 
@@ -120,7 +140,6 @@ async function saveMessage(msg, direction) {
     } else if (m.imageMessage) {
       content = m.imageMessage.caption || '';
       msgType = 'image';
-      // حفظ الصورة لاحقاً يمكن إضافته
     } else if (m.videoMessage) {
       content = m.videoMessage.caption || '🎥 فيديو';
       msgType = 'video';
@@ -137,23 +156,22 @@ async function saveMessage(msg, direction) {
       content = '🎭 ملصق';
       msgType = 'sticker';
     } else if (m.reactionMessage) {
-      return; // تجاهل reactions
+      return;
     } else {
       content = `[${Object.keys(m)[0] || 'رسالة'}]`;
     }
 
-    // ابحث أو أنشئ محادثة
     const convId = await getOrCreateConv(phone, pushName, direction, content, timestamp);
     if (!convId) return;
 
-    // تحقق من عدم وجود الرسالة مسبقاً (منع التكرار)
+    // منع التكرار
     const { data: dup } = await supabase
       .from('alfhd_messages')
       .select('id')
       .eq('external_id', msgId)
       .maybeSingle();
 
-    if (dup) return; // رسالة مكررة
+    if (dup) return;
 
     await supabase.from('alfhd_messages').insert({
       conversation_id: convId,
@@ -175,13 +193,10 @@ async function saveMessage(msg, direction) {
 }
 
 // ── اتصال واتساب ──
-let pairingDone = false;
-
 async function connectToWhatsApp() {
-  const authDir = path.join(__dirname, 'auth_info');
-  if (!fs.existsSync(authDir)) fs.mkdirSync(authDir, { recursive: true });
+  if (!fs.existsSync(AUTH_DIR)) fs.mkdirSync(AUTH_DIR, { recursive: true });
 
-  const { state, saveCreds } = await useMultiFileAuthState(authDir);
+  const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
   const { version } = await fetchLatestBaileysVersion();
 
   console.log(`📱 Baileys v${version.join('.')}`);
@@ -191,7 +206,8 @@ async function connectToWhatsApp() {
     auth: state,
     printQRInTerminal: false,
     logger: pino({ level: 'silent' }),
-    browser: ['AlFhd', 'Chrome', '1.0.0'],
+    // ✅ إعدادات تدعم واتساب Business
+    browser: ['Ubuntu', 'Chrome', '22.0.0'],
     syncFullHistory: false,
     markOnlineOnConnect: false,
   });
@@ -201,39 +217,54 @@ async function connectToWhatsApp() {
   sock.ev.on('connection.update', async (update) => {
     const { connection, lastDisconnect, qr } = update;
 
-    // اطلب pairing code فور بدء الاتصال
-    if (qr && !sock.authState.creds.registered && !pairingDone && WA_PHONE) {
-      pairingDone = true;
-      console.log('📲 QR جاهز — طلب كود الربط...');
-      try {
-        const code = await sock.requestPairingCode(WA_PHONE);
-        console.log('\n══════════════════════════════');
-        console.log(`📱 كود الربط: ${code}`);
-        console.log('واتساب ← الأجهزة المرتبطة ← ربط جهاز ← ربط برقم الهاتف');
-        console.log('══════════════════════════════\n');
-      } catch (e) {
-        pairingDone = false;
-        console.error('pairing error:', e.message);
-        // fallback QR
-        QRCode.generate(qr, { small: true });
-      }
+    // ✅ الصح: نطلب الكود مباشرة بدون انتظار QR
+    if (!sock.authState.creds.registered && WA_PHONE && !global.pairingDone) {
+      global.pairingDone = true;
+      setTimeout(async () => {
+        try {
+          const code = await sock.requestPairingCode(WA_PHONE);
+          console.log('\n══════════════════════════════');
+          console.log(`📱 كود الربط: ${code}`);
+          console.log('واتساب Business ← الأجهزة المرتبطة ← ربط جهاز ← ربط برقم الهاتف');
+          console.log(`أدخل الكود: ${code}`);
+          console.log('الكود صالح لمدة 160 ثانية — أدخله فوراً!');
+          console.log('══════════════════════════════\n');
+        } catch (e) {
+          global.pairingDone = false;
+          console.error('pairing error:', e.message);
+          // مسح الـ session إذا فشل الربط
+          if (fs.existsSync(AUTH_DIR)) {
+            fs.rmSync(AUTH_DIR, { recursive: true, force: true });
+          }
+          setTimeout(() => process.exit(0), 2000);
+        }
+      }, 3000);
     } else if (qr && !WA_PHONE) {
       QRCode.generate(qr, { small: true });
     }
 
     if (connection === 'close') {
       global.waConnected = false;
-      pairingDone = false;
+      global.pairingDone = false;
       const code = lastDisconnect?.error?.output?.statusCode;
       const retry = code !== DisconnectReason.loggedOut;
       console.log(`❌ انقطع (${code}). إعادة: ${retry}`);
-      if (retry) setTimeout(connectToWhatsApp, 5000);
+      if (retry) {
+        setTimeout(connectToWhatsApp, 5000);
+      } else {
+        // تسجيل خروج — امسح الـ session
+        console.log('🗑️ تسجيل خروج. مسح الـ Session...');
+        if (fs.existsSync(AUTH_DIR)) {
+          fs.rmSync(AUTH_DIR, { recursive: true, force: true });
+        }
+        setTimeout(connectToWhatsApp, 5000);
+      }
     }
 
     if (connection === 'open') {
       global.waConnected = true;
       global.waPhone = sock.user?.id?.split(':')[0];
-      console.log(`✅ متصل! ${global.waPhone}`);
+      console.log(`✅ واتساب Business متصل! ${global.waPhone}`);
     }
   });
 
