@@ -168,6 +168,8 @@ async function saveMessage(msg, direction) {
   }
 }
 
+const readline = require('readline');
+
 // ── WhatsApp Connection ──
 async function connectToWhatsApp() {
   const authDir = path.join(__dirname, 'auth_info');
@@ -188,16 +190,34 @@ async function connectToWhatsApp() {
     markOnlineOnConnect: false,
   });
 
-  // ── QR Code ──
+  // ── ربط برقم الهاتف ──
   sock.ev.on('connection.update', async (update) => {
     const { connection, lastDisconnect, qr } = update;
 
-    if (qr) {
-      console.log('\n═══════════════════════════════════');
-      console.log('امسح هذا الكود بواتساب:');
-      console.log('واتساب ← النقاط الثلاث ← الأجهزة المرتبطة ← ربط جهاز');
-      console.log('═══════════════════════════════════\n');
-      QRCode.generate(qr, { small: true });
+    // لو لم يتم التسجيل بعد — استخدم pairing code
+    if (!sock.authState.creds.registered) {
+      const phoneNumber = process.env.WA_PHONE_NUMBER;
+      if (phoneNumber) {
+        try {
+          await new Promise(r => setTimeout(r, 2000));
+          const code = await sock.requestPairingCode(phoneNumber);
+          console.log('\n═══════════════════════════════════');
+          console.log(`📱 كود الربط: ${code}`);
+          console.log('افتح واتساب ← الأجهزة المرتبطة ← ربط جهاز ← ربط برقم الهاتف');
+          console.log(`أدخل الكود: ${code}`);
+          console.log('═══════════════════════════════════\n');
+        } catch (e) {
+          console.error('خطأ في طلب كود الربط:', e.message);
+        }
+      } else {
+        // fallback للـ QR
+        if (qr) {
+          console.log('\n═══════════════════════════════════');
+          console.log('امسح هذا الكود بواتساب:');
+          QRCode.generate(qr, { small: true });
+          console.log('═══════════════════════════════════\n');
+        }
+      }
     }
 
     if (connection === 'close') {
@@ -225,10 +245,7 @@ async function connectToWhatsApp() {
 
     for (const msg of messages) {
       if (!msg.message) continue;
-
-      const isFromMe = msg.key.fromMe;
-      const direction = isFromMe ? 'outgoing' : 'incoming';
-
+      const direction = msg.key.fromMe ? 'outgoing' : 'incoming';
       await saveMessage(msg, direction);
     }
   });
