@@ -5,22 +5,19 @@ const {
   DisconnectReason,
   useMultiFileAuthState,
   fetchLatestBaileysVersion,
-  downloadMediaMessage,
 } = require('@whiskeysockets/baileys');
 
 const pino = require('pino');
-const QRCode = require('qrcode-terminal');
 const express = require('express');
 const { createClient } = require('@supabase/supabase-js');
 const path = require('path');
 const fs = require('fs');
+const QRCodeLib = require('qrcode');
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_KEY;
 const PORT = process.env.PORT || 3001;
 const WA_PHONE = process.env.WA_PHONE_NUMBER || '';
-
-// ✅ مجلد جديد دائماً عشان نتجنب الـ session القديمة
 const AUTH_DIR = path.join(__dirname, 'auth_info_business');
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
@@ -30,9 +27,39 @@ const app = express();
 app.use(express.json());
 
 app.get('/', (req, res) => res.json({ status: 'running', connected: global.waConnected || false }));
-app.get('/status', (req, res) => res.json({ connected: global.waConnected || false, phone: global.waPhone || null }));
 
-// إرسال رسالة (للرد من الموقع)
+app.get('/status', (req, res) => res.json({
+  connected: global.waConnected || false,
+  phone: global.waPhone || null,
+  uptime: process.uptime(),
+}));
+
+// ✅ صفحة QR
+app.get('/qr', async (req, res) => {
+  if (global.waConnected) {
+    return res.send('<h2 style="font-family:sans-serif;color:green;text-align:center;margin-top:50px">✅ واتساب متصل!</h2>');
+  }
+  if (!global.lastQR) {
+    return res.send('<h2 style="font-family:sans-serif;color:orange;text-align:center;margin-top:50px">⏳ انتظر قليلاً وأعد تحميل الصفحة...<br><script>setTimeout(()=>location.reload(),5000)</script></h2>');
+  }
+  try {
+    const qrImage = await QRCodeLib.toDataURL(global.lastQR, { width: 400 });
+    res.send(`<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>WhatsApp QR</title>
+    <style>body{font-family:sans-serif;text-align:center;background:#111;color:white;padding:30px}img{border-radius:16px;margin:20px auto;display:block}h2{color:#25D366}p{color:#aaa}button{background:#25D366;color:white;border:none;padding:12px 24px;border-radius:8px;font-size:16px;cursor:pointer;margin-top:10px}</style>
+    </head><body>
+    <h2>📱 امسح الكود بواتساب Business</h2>
+    <p>واتساب ← الأجهزة المرتبطة ← ربط جهاز</p>
+    <img src="${qrImage}" width="300" height="300"/>
+    <br><button onclick="location.reload()">🔄 تحديث QR</button>
+    <p style="color:#666;font-size:12px">الكود يتجدد كل 20 ثانية</p>
+    <script>setTimeout(()=>location.reload(),20000)</script>
+    </body></html>`);
+  } catch (e) {
+    res.send('<h2 style="color:red">خطأ في توليد QR</h2>');
+  }
+});
+
+// ✅ إرسال رسالة من الموقع
 app.post('/send', async (req, res) => {
   const { phone, message } = req.body;
   if (!phone || !message) return res.status(400).json({ error: 'phone and message required' });
@@ -46,17 +73,17 @@ app.post('/send', async (req, res) => {
   }
 });
 
-// مسح الـ Session وإعادة التشغيل
+// مسح الـ Session
 app.post('/reset-session', (req, res) => {
   try {
     if (fs.existsSync(AUTH_DIR)) {
       fs.rmSync(AUTH_DIR, { recursive: true, force: true });
-      console.log('🗑️ تم مسح ملفات الـ Session');
     }
     global.pairingDone = false;
     global.waConnected = false;
     global.waPhone = null;
-    res.json({ success: true, message: 'تم مسح الـ Session. سيتم إعادة التشغيل...' });
+    global.lastQR = null;
+    res.json({ success: true });
     setTimeout(() => process.exit(0), 1000);
   } catch (e) {
     res.status(500).json({ success: false, error: e.message });
@@ -70,13 +97,11 @@ function phoneFromJid(jid) {
   if (!jid) return '';
   return jid.replace(/@s\.whatsapp\.net|@g\.us|@c\.us/g, '').split(':')[0];
 }
-
 function isGroup(jid) { return jid?.endsWith('@g.us'); }
 
 // ── حفظ أو تحديث محادثة ──
 async function getOrCreateConv(phone, name, direction, content, timestamp) {
   const convKey = `wa_${phone}`;
-
   const { data: existing } = await supabase
     .from('alfhd_conversations')
     .select('id, unread_count, customer_name')
@@ -88,11 +113,13 @@ async function getOrCreateConv(phone, name, direction, content, timestamp) {
       last_message: content.slice(0, 200),
       last_message_time: timestamp,
       unread_count: direction === 'incoming' ? (existing.unread_count || 0) + 1 : (existing.unread_count || 0),
-      customer_name: direction === 'incoming' && name && name !== phone ? name : existing.customer_name,
+      // ✅ تحديث الاسم دائماً إذا جاء من الرسالة
+      customer_name: (direction === 'incoming' && name && name !== phone) ? name : existing.customer_name,
     }).eq('id', existing.id);
     return existing.id;
   }
 
+  // ✅ اسم صحيح بدل الـ ID
   const displayName = (name && name !== phone) ? name : `+${phone}`;
   const { data: newConv } = await supabase
     .from('alfhd_conversations')
@@ -128,7 +155,6 @@ async function saveMessage(msg, direction) {
 
     let content = '';
     let msgType = 'text';
-    let mediaUrl = null;
 
     const m = msg.message;
     if (!m) return;
@@ -138,7 +164,7 @@ async function saveMessage(msg, direction) {
     } else if (m.extendedTextMessage?.text) {
       content = m.extendedTextMessage.text;
     } else if (m.imageMessage) {
-      content = m.imageMessage.caption || '';
+      content = m.imageMessage.caption || '📷 صورة';
       msgType = 'image';
     } else if (m.videoMessage) {
       content = m.videoMessage.caption || '🎥 فيديو';
@@ -170,7 +196,6 @@ async function saveMessage(msg, direction) {
       .select('id')
       .eq('external_id', msgId)
       .maybeSingle();
-
     if (dup) return;
 
     await supabase.from('alfhd_messages').insert({
@@ -178,14 +203,12 @@ async function saveMessage(msg, direction) {
       direction,
       content: content || '...',
       type: msgType,
-      media_url: mediaUrl,
       external_id: msgId,
       created_at: timestamp,
       source: 'whatsapp',
     });
 
-    const arrow = direction === 'incoming' ? '📨' : '📤';
-    console.log(`${arrow} WA [${phone}] ${pushName}: ${content.slice(0, 60)}`);
+    console.log(`${direction === 'incoming' ? '📨' : '📤'} WA [${phone}] ${pushName}: ${content.slice(0, 60)}`);
 
   } catch (e) {
     console.error('saveMessage error:', e.message);
@@ -198,7 +221,6 @@ async function connectToWhatsApp() {
 
   const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
   const { version } = await fetchLatestBaileysVersion();
-
   console.log(`📱 Baileys v${version.join('.')}`);
 
   const sock = makeWASocket({
@@ -206,7 +228,6 @@ async function connectToWhatsApp() {
     auth: state,
     printQRInTerminal: false,
     logger: pino({ level: 'silent' }),
-    // ✅ إعدادات تدعم واتساب Business
     browser: ['Ubuntu', 'Chrome', '22.0.0'],
     syncFullHistory: false,
     markOnlineOnConnect: false,
@@ -217,52 +238,51 @@ async function connectToWhatsApp() {
   sock.ev.on('connection.update', async (update) => {
     const { connection, lastDisconnect, qr } = update;
 
-    // ✅ الصح: نطلب الكود مباشرة بدون انتظار QR
-    if (!sock.authState.creds.registered && WA_PHONE && !global.pairingDone) {
-      global.pairingDone = true;
-      setTimeout(async () => {
+    if (qr) {
+      global.lastQR = qr;
+      console.log('📲 QR جاهز — افتح: /qr');
+
+      // إذا ما في رقم هاتف — استخدم QR فقط
+      if (!WA_PHONE) return;
+
+      // إذا في رقم — اطلب pairing code
+      if (!global.pairingDone && !sock.authState.creds.registered) {
+        global.pairingDone = true;
         try {
           const code = await sock.requestPairingCode(WA_PHONE);
           console.log('\n══════════════════════════════');
           console.log(`📱 كود الربط: ${code}`);
           console.log('واتساب Business ← الأجهزة المرتبطة ← ربط جهاز ← ربط برقم الهاتف');
           console.log(`أدخل الكود: ${code}`);
-          console.log('الكود صالح لمدة 160 ثانية — أدخله فوراً!');
+          console.log('الكود صالح لمدة 160 ثانية');
           console.log('══════════════════════════════\n');
         } catch (e) {
           global.pairingDone = false;
           console.error('pairing error:', e.message);
-          // مسح الـ session إذا فشل الربط
-          if (fs.existsSync(AUTH_DIR)) {
-            fs.rmSync(AUTH_DIR, { recursive: true, force: true });
-          }
-          setTimeout(() => process.exit(0), 2000);
+          console.log('⚠️ فشل الـ Pairing Code — استخدم QR بدلاً منه على: /qr');
         }
-      }, 3000);
-    } else if (qr && !WA_PHONE) {
-      QRCode.generate(qr, { small: true });
+      }
     }
 
     if (connection === 'close') {
       global.waConnected = false;
       global.pairingDone = false;
+      global.lastQR = null;
       const code = lastDisconnect?.error?.output?.statusCode;
       const retry = code !== DisconnectReason.loggedOut;
       console.log(`❌ انقطع (${code}). إعادة: ${retry}`);
       if (retry) {
         setTimeout(connectToWhatsApp, 5000);
       } else {
-        // تسجيل خروج — امسح الـ session
-        console.log('🗑️ تسجيل خروج. مسح الـ Session...');
-        if (fs.existsSync(AUTH_DIR)) {
-          fs.rmSync(AUTH_DIR, { recursive: true, force: true });
-        }
+        console.log('🗑️ تسجيل خروج — مسح Session...');
+        if (fs.existsSync(AUTH_DIR)) fs.rmSync(AUTH_DIR, { recursive: true, force: true });
         setTimeout(connectToWhatsApp, 5000);
       }
     }
 
     if (connection === 'open') {
       global.waConnected = true;
+      global.lastQR = null;
       global.waPhone = sock.user?.id?.split(':')[0];
       console.log(`✅ واتساب Business متصل! ${global.waPhone}`);
     }
