@@ -197,16 +197,19 @@ async function connectToWhatsApp() {
     // لو لم يتم التسجيل بعد — استخدم pairing code
     if (!sock.authState.creds.registered) {
       const phoneNumber = process.env.WA_PHONE_NUMBER;
-      if (phoneNumber) {
+      if (phoneNumber && !global.pairingRequested) {
+        global.pairingRequested = true;
         try {
-          await new Promise(r => setTimeout(r, 2000));
+          await new Promise(r => setTimeout(r, 3000));
           const code = await sock.requestPairingCode(phoneNumber);
           console.log('\n═══════════════════════════════════');
           console.log(`📱 كود الربط: ${code}`);
           console.log('افتح واتساب ← الأجهزة المرتبطة ← ربط جهاز ← ربط برقم الهاتف');
           console.log(`أدخل الكود: ${code}`);
+          console.log('الكود صالح لمدة 160 ثانية');
           console.log('═══════════════════════════════════\n');
         } catch (e) {
+          global.pairingRequested = false;
           console.error('خطأ في طلب كود الربط:', e.message);
         }
       } else {
