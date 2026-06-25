@@ -12,7 +12,6 @@ const express = require('express');
 const { createClient } = require('@supabase/supabase-js');
 const path = require('path');
 const fs = require('fs');
-const QRCodeLib = require('qrcode');
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_KEY;
@@ -33,31 +32,6 @@ app.get('/status', (req, res) => res.json({
   phone: global.waPhone || null,
   uptime: process.uptime(),
 }));
-
-// ✅ صفحة QR
-app.get('/qr', async (req, res) => {
-  if (global.waConnected) {
-    return res.send('<h2 style="font-family:sans-serif;color:green;text-align:center;margin-top:50px">✅ واتساب متصل!</h2>');
-  }
-  if (!global.lastQR) {
-    return res.send('<h2 style="font-family:sans-serif;color:orange;text-align:center;margin-top:50px">⏳ انتظر قليلاً وأعد تحميل الصفحة...<br><script>setTimeout(()=>location.reload(),5000)</script></h2>');
-  }
-  try {
-    const qrImage = await QRCodeLib.toDataURL(global.lastQR, { width: 400 });
-    res.send(`<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>WhatsApp QR</title>
-    <style>body{font-family:sans-serif;text-align:center;background:#111;color:white;padding:30px}img{border-radius:16px;margin:20px auto;display:block}h2{color:#25D366}p{color:#aaa}button{background:#25D366;color:white;border:none;padding:12px 24px;border-radius:8px;font-size:16px;cursor:pointer;margin-top:10px}</style>
-    </head><body>
-    <h2>📱 امسح الكود بواتساب Business</h2>
-    <p>واتساب ← الأجهزة المرتبطة ← ربط جهاز</p>
-    <img src="${qrImage}" width="300" height="300"/>
-    <br><button onclick="location.reload()">🔄 تحديث QR</button>
-    <p style="color:#666;font-size:12px">الكود يتجدد كل 20 ثانية</p>
-    <script>setTimeout(()=>location.reload(),20000)</script>
-    </body></html>`);
-  } catch (e) {
-    res.send('<h2 style="color:red">خطأ في توليد QR</h2>');
-  }
-});
 
 // ✅ إرسال رسالة من الموقع
 app.post('/send', async (req, res) => {
@@ -82,7 +56,6 @@ app.post('/reset-session', (req, res) => {
     global.pairingDone = false;
     global.waConnected = false;
     global.waPhone = null;
-    global.lastQR = null;
     res.json({ success: true });
     setTimeout(() => process.exit(0), 1000);
   } catch (e) {
@@ -113,13 +86,11 @@ async function getOrCreateConv(phone, name, direction, content, timestamp) {
       last_message: content.slice(0, 200),
       last_message_time: timestamp,
       unread_count: direction === 'incoming' ? (existing.unread_count || 0) + 1 : (existing.unread_count || 0),
-      // ✅ تحديث الاسم دائماً إذا جاء من الرسالة
       customer_name: (direction === 'incoming' && name && name !== phone) ? name : existing.customer_name,
     }).eq('id', existing.id);
     return existing.id;
   }
 
-  // ✅ اسم صحيح بدل الـ ID
   const displayName = (name && name !== phone) ? name : `+${phone}`;
   const { data: newConv } = await supabase
     .from('alfhd_conversations')
@@ -190,7 +161,6 @@ async function saveMessage(msg, direction) {
     const convId = await getOrCreateConv(phone, pushName, direction, content, timestamp);
     if (!convId) return;
 
-    // منع التكرار
     const { data: dup } = await supabase
       .from('alfhd_messages')
       .select('id')
@@ -236,38 +206,30 @@ async function connectToWhatsApp() {
   global.waSock = sock;
 
   sock.ev.on('connection.update', async (update) => {
-    const { connection, lastDisconnect, qr } = update;
+    const { connection, lastDisconnect } = update;
 
-    if (qr) {
-      global.lastQR = qr;
-      console.log('📲 QR جاهز — افتح: /qr');
-
-      // إذا ما في رقم هاتف — استخدم QR فقط
-      if (!WA_PHONE) return;
-
-      // إذا في رقم — اطلب pairing code
-      if (!global.pairingDone && !sock.authState.creds.registered) {
-        global.pairingDone = true;
+    // ✅ طلب Pairing Code مباشرة بدون انتظار QR
+    if (!sock.authState.creds.registered && WA_PHONE && !global.pairingDone) {
+      global.pairingDone = true;
+      setTimeout(async () => {
         try {
           const code = await sock.requestPairingCode(WA_PHONE);
           console.log('\n══════════════════════════════');
           console.log(`📱 كود الربط: ${code}`);
           console.log('واتساب Business ← الأجهزة المرتبطة ← ربط جهاز ← ربط برقم الهاتف');
           console.log(`أدخل الكود: ${code}`);
-          console.log('الكود صالح لمدة 160 ثانية');
+          console.log('الكود صالح لمدة 160 ثانية — أدخله فوراً!');
           console.log('══════════════════════════════\n');
         } catch (e) {
           global.pairingDone = false;
           console.error('pairing error:', e.message);
-          console.log('⚠️ فشل الـ Pairing Code — استخدم QR بدلاً منه على: /qr');
         }
-      }
+      }, 3000);
     }
 
     if (connection === 'close') {
       global.waConnected = false;
       global.pairingDone = false;
-      global.lastQR = null;
       const code = lastDisconnect?.error?.output?.statusCode;
       const retry = code !== DisconnectReason.loggedOut;
       console.log(`❌ انقطع (${code}). إعادة: ${retry}`);
@@ -282,7 +244,6 @@ async function connectToWhatsApp() {
 
     if (connection === 'open') {
       global.waConnected = true;
-      global.lastQR = null;
       global.waPhone = sock.user?.id?.split(':')[0];
       console.log(`✅ واتساب Business متصل! ${global.waPhone}`);
     }
