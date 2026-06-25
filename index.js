@@ -201,21 +201,22 @@ async function connectToWhatsApp() {
   sock.ev.on('connection.update', async (update) => {
     const { connection, lastDisconnect, qr } = update;
 
-    // Pairing code
-    if (qr && WA_PHONE && !pairingDone && !sock.authState.creds.registered) {
+    // اطلب pairing code فور بدء الاتصال
+    if (qr && !sock.authState.creds.registered && !pairingDone && WA_PHONE) {
       pairingDone = true;
-      setTimeout(async () => {
-        try {
-          const code = await sock.requestPairingCode(WA_PHONE);
-          console.log('\n══════════════════════════════');
-          console.log(`📱 كود الربط: ${code}`);
-          console.log('واتساب ← الأجهزة المرتبطة ← ربط جهاز ← ربط برقم الهاتف');
-          console.log('══════════════════════════════\n');
-        } catch (e) {
-          pairingDone = false;
-          console.error('pairing error:', e.message);
-        }
-      }, 2000);
+      console.log('📲 QR جاهز — طلب كود الربط...');
+      try {
+        const code = await sock.requestPairingCode(WA_PHONE);
+        console.log('\n══════════════════════════════');
+        console.log(`📱 كود الربط: ${code}`);
+        console.log('واتساب ← الأجهزة المرتبطة ← ربط جهاز ← ربط برقم الهاتف');
+        console.log('══════════════════════════════\n');
+      } catch (e) {
+        pairingDone = false;
+        console.error('pairing error:', e.message);
+        // fallback QR
+        QRCode.generate(qr, { small: true });
+      }
     } else if (qr && !WA_PHONE) {
       QRCode.generate(qr, { small: true });
     }
