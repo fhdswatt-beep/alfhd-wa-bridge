@@ -9,6 +9,7 @@ const {
 
 const pino = require('pino');
 const express = require('express');
+const cors = require('cors'); // ✅ CORS
 const { createClient } = require('@supabase/supabase-js');
 const path = require('path');
 const fs = require('fs');
@@ -23,7 +24,8 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
 // ── Express ──
 const app = express();
-app.use(express.json());
+app.use(cors()); // ✅ السماح لكل الـ domains بالوصول
+app.use(express.json({ limit: '20mb' })); // ✅ دعم الصور الكبيرة
 
 app.get('/', (req, res) => res.json({ status: 'running', connected: global.waConnected || false }));
 
@@ -33,7 +35,7 @@ app.get('/status', (req, res) => res.json({
   uptime: process.uptime(),
 }));
 
-// ✅ إرسال رسالة من الموقع
+// ✅ إرسال رسالة نصية
 app.post('/send', async (req, res) => {
   const { phone, message } = req.body;
   if (!phone || !message) return res.status(400).json({ error: 'phone and message required' });
@@ -47,16 +49,57 @@ app.post('/send', async (req, res) => {
   }
 });
 
-// مسح الـ Session
+// ✅ إرسال صورة (رابط URL)
+app.post('/send-image', async (req, res) => {
+  const { phone, imageUrl, caption } = req.body;
+  if (!phone || !imageUrl) return res.status(400).json({ error: 'phone and imageUrl required' });
+  if (!global.waSock || !global.waConnected) return res.status(503).json({ error: 'WhatsApp not connected' });
+  try {
+    const jid = phone.includes('@') ? phone : `${phone}@s.whatsapp.net`;
+    await global.waSock.sendMessage(jid, {
+      image: { url: imageUrl },
+      caption: caption || '',
+    });
+    res.json({ success: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ✅ إرسال صوت (رابط URL)
+app.post('/send-audio', async (req, res) => {
+  const { phone, audioUrl } = req.body;
+  if (!phone || !audioUrl) return res.status(400).json({ error: 'phone and audioUrl required' });
+  if (!global.waSock || !global.waConnected) return res.status(503).json({ error: 'WhatsApp not connected' });
+  try {
+    const jid = phone.includes('@') ? phone : `${phone}@s.whatsapp.net`;
+    await global.waSock.sendMessage(jid, {
+      audio: { url: audioUrl },
+      mimetype: 'audio/webm',
+      ptt: true, // رسالة صوتية (Push To Talk)
+    });
+    res.json({ success: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// مسح الـ Session — محمي بكلمة سر
 app.post('/reset-session', (req, res) => {
+  // ✅ حماية: لازم ترسل secret key عشان يمسح الـ session
+  const secret = req.body?.secret || req.headers['x-reset-secret'];
+  if (secret !== (process.env.RESET_SECRET || 'alfhd-reset-2026')) {
+    return res.status(403).json({ error: 'Forbidden — wrong secret' });
+  }
   try {
     if (fs.existsSync(AUTH_DIR)) {
       fs.rmSync(AUTH_DIR, { recursive: true, force: true });
+      console.log('🗑️ تم مسح ملفات الـ Session');
     }
     global.pairingDone = false;
     global.waConnected = false;
     global.waPhone = null;
-    res.json({ success: true });
+    res.json({ success: true, message: 'تم مسح الـ Session. سيتم إعادة التشغيل...' });
     setTimeout(() => process.exit(0), 1000);
   } catch (e) {
     res.status(500).json({ success: false, error: e.message });
@@ -126,6 +169,7 @@ async function saveMessage(msg, direction) {
 
     let content = '';
     let msgType = 'text';
+    let mediaUrl = null;
 
     const m = msg.message;
     if (!m) return;
@@ -137,6 +181,8 @@ async function saveMessage(msg, direction) {
     } else if (m.imageMessage) {
       content = m.imageMessage.caption || '📷 صورة';
       msgType = 'image';
+      // حفظ رابط الصورة إذا كان متاحاً
+      mediaUrl = m.imageMessage.url || null;
     } else if (m.videoMessage) {
       content = m.videoMessage.caption || '🎥 فيديو';
       msgType = 'video';
@@ -161,6 +207,7 @@ async function saveMessage(msg, direction) {
     const convId = await getOrCreateConv(phone, pushName, direction, content, timestamp);
     if (!convId) return;
 
+    // منع التكرار
     const { data: dup } = await supabase
       .from('alfhd_messages')
       .select('id')
@@ -173,6 +220,7 @@ async function saveMessage(msg, direction) {
       direction,
       content: content || '...',
       type: msgType,
+      media_url: mediaUrl,
       external_id: msgId,
       created_at: timestamp,
       source: 'whatsapp',
@@ -208,7 +256,7 @@ async function connectToWhatsApp() {
   sock.ev.on('connection.update', async (update) => {
     const { connection, lastDisconnect } = update;
 
-    // ✅ طلب Pairing Code مباشرة بدون انتظار QR
+    // طلب Pairing Code مباشرة
     if (!sock.authState.creds.registered && WA_PHONE && !global.pairingDone) {
       global.pairingDone = true;
       setTimeout(async () => {
@@ -236,6 +284,7 @@ async function connectToWhatsApp() {
       if (retry) {
         setTimeout(connectToWhatsApp, 5000);
       } else {
+        // ✅ تسجيل خروج — امسح Session فقط في هذه الحالة
         console.log('🗑️ تسجيل خروج — مسح Session...');
         if (fs.existsSync(AUTH_DIR)) fs.rmSync(AUTH_DIR, { recursive: true, force: true });
         setTimeout(connectToWhatsApp, 5000);
