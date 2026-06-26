@@ -156,6 +156,80 @@ async function getOrCreateConv(phone, name, direction, content, timestamp) {
 }
 
 // ══════════════════════════════════════════════
+// المحافظات العراقية بأكوادها (مطابقة لـ App.jsx و Jenni)
+// ══════════════════════════════════════════════
+const IRAQ_GOVERNORATES = [
+  { code: 'BGD', name: 'بغداد' },
+  { code: 'BAS', name: 'البصرة' },
+  { code: 'NIN', name: 'نينوى' },
+  { code: 'ARB', name: 'أربيل' },
+  { code: 'NJF', name: 'النجف' },
+  { code: 'KRB', name: 'كربلاء' },
+  { code: 'BBL', name: 'بابل' },
+  { code: 'DHI', name: 'ذي قار' },
+  { code: 'DYL', name: 'ديالى' },
+  { code: 'ANB', name: 'الأنبار' },
+  { code: 'KRK', name: 'كركوك' },
+  { code: 'WST', name: 'واسط' },
+  { code: 'SAH', name: 'صلاح الدين' },
+  { code: 'QAD', name: 'القادسية' },
+  { code: 'MYS', name: 'ميسان' },
+  { code: 'MTH', name: 'المثنى' },
+  { code: 'DOH', name: 'دهوك' },
+  { code: 'SMH', name: 'السليمانية' },
+];
+
+// تطبيع النص العربي: توحيد الهمزات والألف والتاء المربوطة لمطابقة مرنة
+function normalizeAr(s) {
+  return (s || '')
+    .replace(/[إأآا]/g, 'ا')   // كل أشكال الألف → ا
+    .replace(/ى/g, 'ي')
+    .replace(/ة/g, 'ه')
+    .replace(/[ًٌٍَُِّْ]/g, '') // التشكيل
+    .trim();
+}
+
+// استخراج المحافظة والمنطقة من نص العنوان (منقول طبق الأصل من App.jsx)
+// "بغداد - السنك" → {govCode:'BGD', govName:'بغداد', area:'السنك', detail:''}
+function extractGovernorate(addressText) {
+  const cleanText = (addressText || '').replace(/[*#@!]/g, ' ').replace(/\s+/g, ' ').trim();
+  const normText = normalizeAr(cleanText);
+  let govCode = '', govName = '', area = '', detail = '';
+
+  // طابق بالنص المطبّع (يتسامح مع الهمزات و"ال")
+  const govFound = IRAQ_GOVERNORATES.find((g) => {
+    const n = normalizeAr(g.name);
+    const nNoAl = n.replace(/^ال/, '');
+    return normText.includes(n) || normText.includes(nNoAl);
+  });
+
+  if (govFound) {
+    govCode = govFound.code;
+    govName = govFound.name;
+    // احذف المحافظة من النص الأصلي (بكل صيغها المحتملة) لاستخراج الباقي
+    const n = normalizeAr(govFound.name);
+    const nNoAl = n.replace(/^ال/, '');
+    // ابنِ regex يطابق المحافظة في النص الأصلي متسامحاً مع الهمزات
+    let rest = cleanText;
+    // جرّب حذف الاسم الكامل ثم بدون "ال"
+    for (const variant of [govFound.name, govFound.name.replace(/^ال/, ''), n, nNoAl]) {
+      const idx = normalizeAr(rest).indexOf(normalizeAr(variant));
+      if (idx >= 0) {
+        rest = rest.slice(0, idx) + rest.slice(idx + variant.length);
+        break;
+      }
+    }
+    rest = rest.replace(/^[\s\-،,]+/, '').trim();
+    const parts = rest.split(/[\-،,\s]+/).map((p) => p.trim()).filter(Boolean);
+    area = parts[0] || '';
+    detail = parts.slice(1).join(' ') || '';
+  } else {
+    detail = cleanText;
+  }
+  return { govCode, govName, area, detail };
+}
+
+// ══════════════════════════════════════════════
 // كشف رسالة "تم تثبيت طلبك" تلقائياً وتحويلها لطلب حقيقي
 // (منقول حرف بحرف من fb-poll-messages ليطابق سلوك ماسنجر)
 // ══════════════════════════════════════════════
@@ -218,10 +292,17 @@ function buildOrderFromFields(fields) {
     orderDate = `${y}-${mo.padStart(2, '0')}-${d.padStart(2, '0')}`;
   }
 
+  // ── تفكيك العنوان للحقول الصحيحة المطلوبة من شركة التوصيل (Jenni) ──
+  // "الأنبار - الرمادي" → governorate_code=ANB, governorate_name=الأنبار, area=الرمادي
+  const geo = extractGovernorate(address);
+
   return {
     customer_name: customer || 'زبون من المحادثة',
     phone,
-    address,
+    governorate_code: geo.govCode,
+    governorate_name: geo.govName,
+    area: geo.area,
+    address: geo.detail,            // العنوان التفصيلي = الباقي فقط (بدون المحافظة والمنطقة)
     items: itemLines.join('\n'),
     order_type: orderType,
     total,
@@ -303,6 +384,9 @@ async function processOutgoingForOrder(msgText, conversationId, msgId) {
         page_id: pageId,
         customer_name: orderData.customer_name,
         phone: orderData.phone,
+        governorate_code: orderData.governorate_code || null,
+        governorate_name: orderData.governorate_name || null,
+        area: orderData.area || null,
         address: orderData.address,
         items: orderData.items,
         order_type: orderData.order_type,
