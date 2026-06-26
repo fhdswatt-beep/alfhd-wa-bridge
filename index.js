@@ -397,6 +397,8 @@ async function matchCityToJenni(areaText, govCode) {
   }
 }
 
+// عبارات تحويل المحادثة من المساعد الذكي إلى موظف بشري
+const HANDOFF_PHRASES = [
   'transferred this chat',
   'Your AI Agent',
   'Your AI agent',
