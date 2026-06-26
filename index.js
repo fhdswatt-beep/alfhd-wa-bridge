@@ -332,8 +332,71 @@ async function getWhatsAppPageId() {
   return null;
 }
 
-// عبارات تحويل المحادثة من المساعد الذكي إلى موظف بشري
-const HANDOFF_PHRASES = [
+// ── تطبيع عربي ومطابقة المنطقة بأقرب مدينة رسمية في جيني ──
+function normalizeArCity(s) {
+  return (s || '')
+    .replace(/[إأآا]/g, 'ا').replace(/ى/g, 'ي').replace(/ة/g, 'ه')
+    .replace(/[ًٌٍَُِّْ]/g, '').replace(/\s+/g, ' ').trim();
+}
+
+// مسافة تحرير (Levenshtein) للمطابقة المرنة
+function levDist(a, b) {
+  const m = a.length, n = b.length;
+  const d = Array.from({ length: m + 1 }, (_, i) => [i, ...Array(n).fill(0)]);
+  for (let j = 0; j <= n; j++) d[0][j] = j;
+  for (let i = 1; i <= m; i++)
+    for (let j = 1; j <= n; j++)
+      d[i][j] = Math.min(d[i-1][j]+1, d[i][j-1]+1, d[i-1][j-1] + (a[i-1] === b[j-1] ? 0 : 1));
+  return d[m][n];
+}
+
+// تطابق "بكرجو" → "بكره جو" الرسمية. ترجع اسم المدينة الرسمي أو الأصلي إن لم تجد.
+async function matchCityToJenni(areaText, govCode) {
+  const area = normalizeArCity(areaText);
+  if (!area || !govCode) return areaText;
+  try {
+    const { data } = await supabase
+      .from('jenni_cities')
+      .select('city_name, city_name_norm')
+      .eq('governorate_code', govCode);
+    if (!data || !data.length) return areaText;
+
+    const areaNoSpace = area.replace(/\s/g, '');
+
+    // 1) تطابق تام بعد التطبيع
+    let hit = data.find((c) => c.city_name_norm === area);
+    if (hit) return hit.city_name;
+
+    // 2) تطابق بإزالة الفراغات
+    hit = data.find((c) => (c.city_name_norm || '').replace(/\s/g, '') === areaNoSpace);
+    if (hit) return hit.city_name;
+
+    // 3) احتواء جزئي
+    hit = data.find((c) => {
+      const n = (c.city_name_norm || '').replace(/\s/g, '');
+      return n.length >= 3 && (n.includes(areaNoSpace) || areaNoSpace.includes(n));
+    });
+    if (hit) return hit.city_name;
+
+    // 4) أقرب مدينة بمسافة تحرير ≤ 2 (يحل بكرجو ≈ بكره جو)
+    let best = null, bestD = 99;
+    for (const c of data) {
+      const n = (c.city_name_norm || '').replace(/\s/g, '');
+      if (!n) continue;
+      const dist = levDist(areaNoSpace, n);
+      if (dist < bestD && dist <= 2 && Math.abs(n.length - areaNoSpace.length) <= 2) {
+        bestD = dist; best = c;
+      }
+    }
+    if (best) return best.city_name;
+
+    return areaText; // ما لقينا — نرجع الأصلي
+  } catch (e) {
+    console.error('matchCityToJenni error:', e.message);
+    return areaText;
+  }
+}
+
   'transferred this chat',
   'Your AI Agent',
   'Your AI agent',
@@ -377,6 +440,9 @@ async function processOutgoingForOrder(msgText, conversationId, msgId) {
     const orderData = buildOrderFromFields(fields);
     const pageId = await getWhatsAppPageId();
 
+    // مطابقة المنطقة بأقرب مدينة رسمية في جيني (بكرجو → بكره جو)
+    const matchedCity = await matchCityToJenni(orderData.area, orderData.governorate_code);
+
     const { data: createdOrder } = await supabase
       .from('alfhd_orders')
       .insert({
@@ -386,7 +452,7 @@ async function processOutgoingForOrder(msgText, conversationId, msgId) {
         phone: orderData.phone,
         governorate_code: orderData.governorate_code || null,
         governorate_name: orderData.governorate_name || null,
-        area: orderData.area || null,
+        area: matchedCity || orderData.area || null,
         address: orderData.address,
         items: orderData.items,
         order_type: orderData.order_type,
